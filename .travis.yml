@@ -1,0 +1,29 @@
+language: java
+jdk:
+  - openjdk11
+dist: focal
+
+install:
+  - mvn clean package
+
+before_deploy:
+  - >
+    openssl aes-256-cbc \
+      -K $encrypted_181b839d4a49_key \
+      -iv $encrypted_181b839d4a49_iv \
+      -in deploy/homewall-301021-5c8b8fc4efd0.json.enc \
+      -out deploy/homewall-301021-5c8b8fc4efd0.json \
+      -d
+  - sudo apt-get update
+  - echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | sudo tee -a /etc/apt/sources.list.d/google-cloud-sdk.list
+  - sudo apt-get install -y apt-transport-https ca-certificates gnupg
+  - curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | sudo apt-key --keyring /usr/share/keyrings/cloud.google.gpg add -
+  - sudo apt-get update && sudo apt-get install -y google-cloud-sdk
+  - gcloud auth activate-service-account --key-file deploy/homewall-301021-5c8b8fc4efd0.json
+
+deploy:
+  provider: script
+  skip_cleanup: true
+  script: gcloud functions deploy HomeWall --entry-point=com.scottw.homewall.HomeWall --runtime=java11 --trigger-http --source=target/deployment --project homewall-301021 --allow-unauthenticated --region=europe-west3
+  on:
+    branch: main
