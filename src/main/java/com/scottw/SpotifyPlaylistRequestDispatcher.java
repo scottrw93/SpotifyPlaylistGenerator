@@ -13,7 +13,6 @@ public class SpotifyPlaylistRequestDispatcher implements HttpFunction {
 
   static {
     System.setProperty("GOOGLE_CLOUD_PROJECT", "heroic-passkey-326916");
-    ///Users/scott/projects/wall/homewall-301021-13d254779b63.json
   }
 
   private final ObjectMapper objectMapper = new ObjectMapper();
