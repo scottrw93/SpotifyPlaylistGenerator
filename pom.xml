@@ -28,6 +28,16 @@
 
   <dependencies>
     <dependency>
+      <groupId>com.github.rholder</groupId>
+      <artifactId>guava-retrying</artifactId>
+      <version>2.0.0</version>
+    </dependency>
+    <dependency>
+      <groupId>se.michaelthelin.spotify</groupId>
+      <artifactId>spotify-web-api-java</artifactId>
+      <version>6.5.4</version>
+    </dependency>
+    <dependency>
       <groupId>com.google.cloud</groupId>
       <artifactId>google-cloud-storage</artifactId>
       <version>1.113.9</version>
@@ -72,7 +82,7 @@
         <artifactId>function-maven-plugin</artifactId>
         <version>0.9.2</version>
         <configuration>
-          <functionTarget>com.scottw.SpotifyPlaylistGenerator</functionTarget>
+          <functionTarget>com.scottw.SpotifyPlaylistRequestDispatcher</functionTarget>
         </configuration>
       </plugin>
       <plugin>

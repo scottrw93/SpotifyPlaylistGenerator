@@ -1,173 +1,260 @@
 package com.scottw;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.google.cloud.functions.HttpFunction;
-import com.google.cloud.functions.HttpRequest;
-import com.google.cloud.functions.HttpResponse;
-import com.scottw.core.problem.Problem;
-import com.scottw.core.problem.ProblemRequest;
-import com.scottw.core.wall.Wall;
-import com.scottw.core.wall.WallRequest;
-import com.scottw.dao.ProblemsDao;
-import com.scottw.dao.WallsDao;
-import com.scottw.io.UploadWallImage;
+import com.github.rholder.retry.RetryException;
+import com.github.rholder.retry.Retryer;
+import com.github.rholder.retry.RetryerBuilder;
+import com.github.rholder.retry.StopStrategies;
+import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableSet;
+import com.google.common.collect.Lists;
+import com.scottw.core.GeneratedArtist;
+import com.scottw.core.GeneratedPlaylist;
+import com.scottw.core.GeneratedTrack;
+import com.wrapper.spotify.exceptions.SpotifyWebApiException;
+import com.wrapper.spotify.exceptions.detailed.BadGatewayException;
+import com.wrapper.spotify.model_objects.specification.*;
+import org.apache.hc.core5.http.ParseException;
+
 import java.io.IOException;
-import java.io.InputStream;
-import java.net.HttpURLConnection;
-import java.util.List;
-import java.util.Map;
-import java.util.UUID;
+import java.util.*;
+import java.util.concurrent.ExecutionException;
+import java.util.stream.Collectors;
 
-public class SpotifyPlaylistGenerator implements HttpFunction {
+public class SpotifyPlaylistGenerator {
+  private static final int LIMIT = 10;
 
-  static {
-    System.setProperty("GOOGLE_CLOUD_PROJECT", "homewall-301021");
-    ///Users/scott/projects/wall/homewall-301021-13d254779b63.json
+  private final Retryer<Void> retryer;
+  private final RateLimitedSpotifyApi spotifyApi;
+  private final String userId;
+
+  public SpotifyPlaylistGenerator(String userId, String accessToken) {
+    this.retryer =
+      RetryerBuilder
+        .<Void>newBuilder()
+        .retryIfExceptionOfType(BadGatewayException.class)
+        .withStopStrategy(StopStrategies.stopAfterAttempt(3))
+        .build();
+    this.userId = userId;
+    this.spotifyApi = new RateLimitedSpotifyApi(accessToken);
   }
 
-  private final ObjectMapper objectMapper = new ObjectMapper();
-  private final ProblemsDao problemsDao;
-  private final WallsDao wallsDao;
+  public GeneratedPlaylist generateNewPlaylist(
+    String newPlaylistName,
+    Optional<String> playlistId
+  )
+    throws ParseException, SpotifyWebApiException, IOException, ExecutionException, RetryException {
+    List<Track> tracksOnCurrentPlaylist = playlistId.isPresent()
+      ? getPlaylistTracks(playlistId.orElseThrow())
+      : getLikedTracks();
 
-  public SpotifyPlaylistGenerator() {
-    this.problemsDao = new ProblemsDao();
-    this.wallsDao = new WallsDao();
+    return generateNewPlaylist(newPlaylistName, tracksOnCurrentPlaylist);
   }
 
-  @Override
-  public void service(HttpRequest request, HttpResponse response)
-    throws Exception {
-    response.appendHeader("Access-Control-Allow-Origin", "*");
-    response.appendHeader("Content-Type", "application/json");
+  private GeneratedPlaylist generateNewPlaylist(
+    String newPlaylistName,
+    List<Track> tracksOnCurrentPlaylist
+  )
+    throws ParseException, SpotifyWebApiException, IOException, ExecutionException, RetryException {
+    List<Track> tracksOnNewPlaylist = new ArrayList<>();
 
-    String method = request.getMethod();
-    switch (method) {
-      case "OPTIONS":
-        handleOptions(request, response);
-        break;
-      case "GET":
-        handleGet(request, response);
-        break;
-      case "PUT":
-        break;
-      case "POST":
-        handlePost(request, response);
-        break;
-      case "DELETE":
-        handleDelete(request, response);
-        break;
-      default:
-        response.setStatusCode(405);
-        break;
-    }
-  }
+    for (Track track : tracksOnCurrentPlaylist) {
+      Optional<Track> toAdd = getNextMostPopularTrackOnAlbum(
+        track,
+        ImmutableSet
+          .<String>builder()
+          .addAll(
+            tracksOnCurrentPlaylist
+              .stream()
+              .map(Track::getId)
+              .collect(Collectors.toSet())
+          )
+          .addAll(
+            tracksOnNewPlaylist
+              .stream()
+              .map(Track::getId)
+              .collect(Collectors.toSet())
+          )
+          .build()
+      );
 
-  private void handleDelete(HttpRequest request, HttpResponse response) {
-    String path = request.getPath();
-    if (path.startsWith("/problems/")) {
-      if (path.split("/").length == 3) {
-        String uuid = path.split("/")[2].trim();
-        problemsDao.deleteProblem(UUID.fromString(uuid));
-        response.setStatusCode(204);
-        return;
+      if (toAdd.isPresent()) {
+        tracksOnNewPlaylist.add(toAdd.orElseThrow());
       }
     }
-    response.setStatusCode(404);
+
+    return createPlaylist(newPlaylistName, tracksOnNewPlaylist);
   }
 
-  private void handlePost(HttpRequest request, HttpResponse response)
-    throws IOException {
-    switch (request.getPath()) {
-      case "/images":
-        try (InputStream is = request.getInputStream()) {
-          response
-            .getWriter()
-            .write(
-              objectMapper.writeValueAsString(
-                Map.of(
-                  "src",
-                  UploadWallImage.uploadImage(
-                    is,
-                    request.getContentType().orElseThrow()
-                  )
-                )
-              )
-            );
+  private GeneratedPlaylist createPlaylist(String name, List<Track> tracks)
+    throws ParseException, SpotifyWebApiException, IOException, ExecutionException, RetryException {
+    Playlist createdPlaylist = spotifyApi
+      .fetch()
+      .createPlaylist(userId, name)
+      .build()
+      .execute();
+
+    GeneratedPlaylist.Builder generatedPlaylistBuilder = GeneratedPlaylist
+      .builder()
+      .setName(name)
+      .setHref(
+        createdPlaylist
+          .getExternalUrls()
+          .getExternalUrls()
+          .values()
+          .iterator()
+          .next()
+      );
+
+    for (List<Track> chunk : Lists.partition(tracks, LIMIT)) {
+      retryer.call(
+        () -> {
+          spotifyApi
+            .fetch()
+            .addItemsToPlaylist(
+              createdPlaylist.getId(),
+              chunk
+                .stream()
+                .map(Track::getUri)
+                .collect(Collectors.toList())
+                .toArray(new String[0])
+            )
+            .build()
+            .execute();
+
+          return null;
         }
-        break;
-      case "/problems":
-        response
-          .getWriter()
-          .write(
-            objectMapper.writeValueAsString(
-              createProblem(
-                objectMapper.readValue(
-                  request.getInputStream(),
-                  ProblemRequest.class
+      );
+
+      generatedPlaylistBuilder.addAllTracks(
+        chunk
+          .stream()
+          .map(
+            track ->
+              GeneratedTrack
+                .builder()
+                .setArtist(
+                  GeneratedArtist
+                    .builder()
+                    .setName(track.getArtists()[0].getName())
+                    .build()
                 )
-              )
-            )
-          );
-        break;
-      case "/walls":
-        response
-          .getWriter()
-          .write(
-            objectMapper.writeValueAsString(
-              createWall(
-                objectMapper.readValue(
-                  request.getInputStream(),
-                  WallRequest.class
-                )
-              )
-            )
-          );
-        break;
-      default:
-        response.setStatusCode(404);
-        break;
+                .setName(track.getName())
+                .build()
+          )
+          .collect(Collectors.toSet())
+      );
     }
+
+    return generatedPlaylistBuilder.build();
   }
 
-  private Wall createWall(WallRequest wallRequest) {
-    return wallsDao.createWall(wallRequest);
-  }
+  private Optional<Track> getNextMostPopularTrackOnAlbum(
+    Track track,
+    Set<String> tracksToExclude
+  )
+    throws ParseException, SpotifyWebApiException, IOException {
+    Optional<String> albumId = Optional.ofNullable(track.getAlbum().getId());
 
-  private Problem createProblem(ProblemRequest problemRequest) {
-    return problemsDao.createProblem(problemRequest);
-  }
+    if (albumId.isPresent()) {
+      List<Track> tracks = new ArrayList<>();
 
-  private void handleGet(HttpRequest request, HttpResponse response)
-    throws IOException {
-    switch (request.getPath()) {
-      case "/problems":
-        response
-          .getWriter()
-          .write(objectMapper.writeValueAsString(getProblems()));
-        break;
-      case "/walls":
-        response.getWriter().write(objectMapper.writeValueAsString(getWalls()));
-        break;
-      default:
-        response.setStatusCode(404);
+      int offset = 0;
+
+      while (true) {
+        Paging<TrackSimplified> album = spotifyApi
+          .fetch()
+          .getAlbumsTracks(albumId.orElseThrow())
+          .limit(LIMIT)
+          .offset(offset)
+          .build()
+          .execute();
+
+        String[] idsToFetch = Arrays
+          .stream(album.getItems())
+          .map(TrackSimplified::getId)
+          .filter(trackId -> !trackId.equals(track.getId()))
+          .filter(trackId -> !tracksToExclude.contains(trackId))
+          .collect(Collectors.toList())
+          .toArray(new String[0]);
+
+        if (idsToFetch.length == 0) {
+          break;
+        }
+
+        tracks.addAll(
+          Arrays
+            .stream(
+              spotifyApi.fetch().getSeveralTracks(idsToFetch).build().execute()
+            )
+            .collect(Collectors.toList())
+        );
+
+        if (album.getItems().length < LIMIT) {
+          break;
+        } else {
+          offset += LIMIT;
+        }
+      }
+
+      return tracks.stream().max(Comparator.comparing(Track::getPopularity));
     }
+
+    return Optional.empty();
   }
 
-  private List<Wall> getWalls() {
-    return wallsDao.getWalls();
+  private List<Track> getLikedTracks()
+    throws ParseException, SpotifyWebApiException, IOException {
+    ImmutableList.Builder<Track> tracksOnPlaylist = ImmutableList.builder();
+    int offset = 0;
+
+    while (true) {
+      Paging<SavedTrack> tracks = spotifyApi
+        .fetch()
+        .getUsersSavedTracks()
+        .limit(LIMIT)
+        .offset(offset)
+        .build()
+        .execute();
+
+      for (SavedTrack track : tracks.getItems()) {
+        tracksOnPlaylist.add(track.getTrack());
+      }
+
+      if (tracks.getItems().length < LIMIT) {
+        break;
+      } else {
+        offset += LIMIT;
+      }
+    }
+
+    return tracksOnPlaylist.build();
   }
 
-  private List<Problem> getProblems() throws IOException {
-    return problemsDao.getProblems();
-  }
+  private List<Track> getPlaylistTracks(String playlistId)
+    throws ParseException, SpotifyWebApiException, IOException {
+    ImmutableList.Builder<Track> tracksOnPlaylist = ImmutableList.builder();
+    int offset = 0;
 
-  private void handleOptions(HttpRequest request, HttpResponse response) {
-    response.appendHeader(
-      "Access-Control-Allow-Methods",
-      "POST, PUT, GET, OPTIONS, DELETE"
-    );
-    response.appendHeader("Access-Control-Allow-Headers", "Content-Type");
-    response.appendHeader("Access-Control-Max-Age", "3600");
-    response.setStatusCode(HttpURLConnection.HTTP_NO_CONTENT);
+    while (true) {
+      Paging<PlaylistTrack> tracks = spotifyApi
+        .fetch()
+        .getPlaylistsItems(playlistId)
+        .limit(LIMIT)
+        .offset(offset)
+        .build()
+        .execute();
+
+      for (PlaylistTrack track : tracks.getItems()) {
+        tracksOnPlaylist.add((Track) track.getTrack());
+      }
+
+      if (tracks.getItems().length < LIMIT) {
+        break;
+      } else {
+        offset += LIMIT;
+      }
+    }
+
+    return tracksOnPlaylist.build();
   }
 }
