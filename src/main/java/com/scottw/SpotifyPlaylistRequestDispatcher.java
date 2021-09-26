@@ -6,7 +6,6 @@ import com.google.cloud.functions.HttpRequest;
 import com.google.cloud.functions.HttpResponse;
 import com.scottw.core.GeneratePlaylistPayload;
 import com.scottw.core.GeneratedPlaylist;
-
 import java.io.IOException;
 import java.net.HttpURLConnection;
 

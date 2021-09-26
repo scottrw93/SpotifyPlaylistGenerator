@@ -13,12 +13,11 @@ import com.scottw.core.GeneratedTrack;
 import com.wrapper.spotify.exceptions.SpotifyWebApiException;
 import com.wrapper.spotify.exceptions.detailed.BadGatewayException;
 import com.wrapper.spotify.model_objects.specification.*;
-import org.apache.hc.core5.http.ParseException;
-
 import java.io.IOException;
 import java.util.*;
 import java.util.concurrent.ExecutionException;
 import java.util.stream.Collectors;
+import org.apache.hc.core5.http.ParseException;
 
 public class SpotifyPlaylistGenerator {
   private static final int LIMIT = 10;
