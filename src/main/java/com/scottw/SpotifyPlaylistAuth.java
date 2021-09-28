@@ -11,7 +11,7 @@ public class SpotifyPlaylistAuth {
   private final RateLimitedSpotifyApi spotifyApi;
 
   private final String clientId = "a6c082a9f2404c55a2bca89eadf1cc1f";
-  private final String clientSecret = "xxx"; // TODO: Figure out secrets in gcp functions
+  private final String clientSecret = System.getenv("SpotifyClientSecret");
   private final URI redirectUri = SpotifyHttpManager.makeUri(
     "http://localhost:8888/callback"
   );
